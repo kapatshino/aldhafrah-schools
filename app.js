@@ -1,318 +1,468 @@
-/******************************************************
- * SMART SCHOOLS DASHBOARD - FULL APP.JS REBUILD
- * Features:
- * - Leaflet Map
- * - School markers
- * - Routing (FIXED shortest path logic)
- * - Search + Filters
- * - Engineer filtering
- * - Info panels
- ******************************************************/
+/* ═══════════════════════════════════════════════
+   TRANSLATIONS
+═══════════════════════════════════════════════ */
+let currentLang = "ar";
 
-/**********************
- * MAP INITIALIZATION
- **********************/
-const map = L.map("map-stage", {
-  zoomControl: true
-}).setView([24.4539, 54.3773], 11);
-
-// Base map
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  attribution: "&copy; OpenStreetMap contributors"
-}).addTo(map);
-
-/**********************
- * GLOBAL STATE
- **********************/
-let schools = window.SCHOOLS || [];
-let filteredSchools = [...schools];
-
-let markersLayer = L.layerGroup().addTo(map);
-
-let routeControl = null;
-let currentSchool = null;
-let userLocation = null;
-
-/**********************
- * ICONS
- **********************/
-const schoolIcon = L.icon({
-  iconUrl: "https://cdn-icons-png.flaticon.com/512/2991/2991148.png",
-  iconSize: [30, 30],
-  iconAnchor: [15, 30]
-});
-
-/**********************
- * UTILITIES
- **********************/
-function fmtKm(meters) {
-  return (meters / 1000).toFixed(2);
-}
-
-function fmtMin(seconds) {
-  return Math.round(seconds / 60);
-}
-
-/**********************
- * USER LOCATION
- **********************/
-function initUserLocation() {
-  if (!navigator.geolocation) {
-    userLocation = { lat: 24.4539, lng: 54.3773 };
-    return;
+const UI = {
+  ar: {
+    dashboard:"لوحة المدارس الذكية", subtitle:"إدارة المدارس والزيارات الميدانية",
+    filters:"البحث والفلترة", filterEngineer:"فلترة حسب المهندس",
+    searchLabel:"بحث عن مدرسة", search:"اكتب اسم المدرسة...",
+    totalSchools:"إجمالي المدارس", results:"النتائج",
+    schoolList:"قائمة المدارس", selectSchool:"اختر مدرسة",
+    ready:"جاهز", schoolDetails:"تفاصيل المدرسة",
+    distance:"المسافة", time:"الوقت", engineer:"المهندس",
+    email:"البريد", phone:"الهاتف",
+    openMaps:"فتح في Google Maps", headquarters:"المركز الرئيسي",
+    all:"كل المهندسين", unnamed:"بدون اسم",
+    calculating:"جارٍ الحساب...", noData:"غير محدد", notAvail:"غير متوفر",
+    filtersBtn:"الفلاتر", schoolsBtn:"المدارس"
+  },
+  en: {
+    dashboard:"Smart School Dashboard", subtitle:"School and field-visit management",
+    filters:"Search & Filters", filterEngineer:"Filter by Engineer",
+    searchLabel:"Search for a School", search:"Type school or engineer name...",
+    totalSchools:"Total Schools", results:"Results",
+    schoolList:"School List", selectSchool:"Select a school",
+    ready:"Ready", schoolDetails:"School Details",
+    distance:"Distance", time:"Travel Time", engineer:"Engineer",
+    email:"Email", phone:"Phone",
+    openMaps:"Open in Google Maps", headquarters:"Main Headquarters",
+    all:"All Engineers", unnamed:"Unnamed school",
+    calculating:"Calculating...", noData:"Not specified", notAvail:"Not available",
+    filtersBtn:"Filters", schoolsBtn:"Schools"
   }
-
-  navigator.geolocation.getCurrentPosition(
-    (pos) => {
-      userLocation = {
-        lat: pos.coords.latitude,
-        lng: pos.coords.longitude
-      };
-    },
-    () => {
-      userLocation = { lat: 24.4539, lng: 54.3773 };
-    }
-  );
-}
-
-/**********************
- * MARKERS RENDER
- **********************/
-function clearMarkers() {
-  markersLayer.clearLayers();
-}
-
-function renderMarkers(list) {
-  clearMarkers();
-
-  list.forEach((school) => {
-    if (!school.lat || !school.lng) return;
-
-    const marker = L.marker([school.lat, school.lng], {
-      icon: schoolIcon
-    });
-
-    marker.on("click", () => onSchoolSelect(school));
-
-    marker.bindPopup(`
-      <div>
-        <strong>${school.name || "Unknown"}</strong><br/>
-        ${school.engineer || ""}
-      </div>
-    `);
-
-    markersLayer.addLayer(marker);
-  });
-}
-
-/**********************
- * ROUTING ENGINE (FIXED)
- **********************/
-const router = L.Routing.osrmv1({
-  serviceUrl: "https://router.project-osrm.org/route/v1",
-  profile: "driving"
-});
-
-function initRouting() {
-  if (routeControl) {
-    map.removeControl(routeControl);
-  }
-
-  routeControl = L.Routing.control({
-    router: router,
-    showAlternatives: true,
-    fitSelectedRoutes: true,
-    addWaypoints: false,
-    draggableWaypoints: false,
-    routeWhileDragging: false,
-    show: false,
-    createMarker: () => null,
-    lineOptions: {
-      styles: [{ color: "#1a73e8", weight: 5, opacity: 0.85 }]
-    }
-  });
-
-  routeControl.on("routesfound", handleRoutesFound);
-
-  routeControl.addTo(map);
-}
-
-/**********************
- * ROUTE SELECTION FIX (CORE FIX)
- **********************/
-function handleRoutesFound(e) {
-  const routes = e.routes;
-
-  if (!routes || routes.length === 0) return;
-
-  // 🔥 اختيار أقصر مسار فعلياً (مهم جداً)
-  let bestRoute = routes[0];
-
-  for (let i = 1; i < routes.length; i++) {
-    if (routes[i].summary.totalDistance < bestRoute.summary.totalDistance) {
-      bestRoute = routes[i];
-    }
-  }
-
-  const distanceKm = fmtKm(bestRoute.summary.totalDistance);
-  const timeMin = fmtMin(bestRoute.summary.totalTime);
-
-  updateSchoolInfo(currentSchool, distanceKm, timeMin);
-}
-
-/**********************
- * ROUTE DRAW
- **********************/
-function drawRoute(school) {
-  if (!userLocation) initUserLocation();
-
-  if (!routeControl) initRouting();
-
-  routeControl.setWaypoints([
-    L.latLng(userLocation.lat, userLocation.lng),
-    L.latLng(school.lat, school.lng)
-  ]);
-}
-
-/**********************
- * SCHOOL SELECT
- **********************/
-function onSchoolSelect(school) {
-  currentSchool = school;
-
-  map.setView([school.lat, school.lng], 14);
-
-  drawRoute(school);
-
-  openSchoolPanel(school);
-}
-
-/**********************
- * PANEL UI
- **********************/
-function openSchoolPanel(school) {
-  const panel = document.getElementById("schoolInfoPanel");
-  if (!panel) return;
-
-  panel.classList.add("active");
-
-  document.getElementById("schoolName").innerText = school.name || "-";
-  document.getElementById("schoolEngineer").innerText = school.engineer || "-";
-  document.getElementById("schoolPhone").innerText = school.phone || "-";
-  document.getElementById("schoolEmail").innerText = school.email || "-";
-}
-
-/**********************
- * UPDATE INFO
- **********************/
-function updateSchoolInfo(school, distanceKm, timeMin) {
-  if (!school) return;
-
-  const distEl = document.getElementById("schoolDistance");
-  const timeEl = document.getElementById("schoolTime");
-
-  if (distEl) distEl.innerText = `${distanceKm} km`;
-  if (timeEl) timeEl.innerText = `${timeMin} min`;
-}
-
-/**********************
- * SEARCH SYSTEM
- **********************/
-function searchSchools(query) {
-  const q = (query || "").toLowerCase();
-
-  filteredSchools = schools.filter((s) =>
-    (s.name || "").toLowerCase().includes(q)
-  );
-
-  renderMarkers(filteredSchools);
-}
-
-/**********************
- * ENGINEER FILTER
- **********************/
-function filterByEngineer(engineer) {
-  if (!engineer) {
-    filteredSchools = [...schools];
-    renderMarkers(filteredSchools);
-    return;
-  }
-
-  filteredSchools = schools.filter(
-    (s) => (s.engineer || "") === engineer
-  );
-
-  renderMarkers(filteredSchools);
-}
-
-/**********************
- * RESET FILTERS
- **********************/
-function resetFilters() {
-  filteredSchools = [...schools];
-  renderMarkers(filteredSchools);
-}
-
-/**********************
- * DISTANCE SORTING
- **********************/
-function sortByDistance() {
-  if (!userLocation) return;
-
-  filteredSchools.sort((a, b) => {
-    const da = getDistance(userLocation, a);
-    const db = getDistance(userLocation, b);
-    return da - db;
-  });
-
-  renderMarkers(filteredSchools);
-}
-
-function getDistance(a, b) {
-  const R = 6371;
-  const dLat = (b.lat - a.lat) * Math.PI / 180;
-  const dLng = (b.lng - a.lng) * Math.PI / 180;
-
-  const x =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(a.lat * Math.PI / 180) *
-    Math.cos(b.lat * Math.PI / 180) *
-    Math.sin(dLng / 2) ** 2;
-
-  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
-}
-
-/**********************
- * UI HOOKS
- **********************/
-function bindUI() {
-  const search = document.getElementById("searchInput");
-
-  if (search) {
-    search.addEventListener("input", (e) => {
-      searchSchools(e.target.value);
-    });
-  }
-}
-
-/**********************
- * INIT APP
- **********************/
-function initApp() {
-  initUserLocation();
-  renderMarkers(schools);
-  bindUI();
-}
-
-initApp();
-
-/**********************
- * DEBUG HELPERS
- **********************/
-window.debugApp = {
-  schools,
-  map,
-  routeControl,
-  resetFilters,
-  sortByDistance
 };
+
+const T = () => UI[currentLang];
+
+/* ═══════════════════════════════════════════════
+   MAP
+═══════════════════════════════════════════════ */
+const CENTER_LAT = 23.679486;
+const CENTER_LNG = 53.691098;
+
+const map = L.map("map", { zoomControl: true, attributionControl: false })
+              .setView([CENTER_LAT, CENTER_LNG], 8);
+
+const voyager = L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",{attribution:"© CARTO"}).addTo(map);
+const satellite = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",{attribution:"© Esri"});
+L.control.layers({"Voyager":voyager,"Satellite":satellite}).addTo(map);
+
+const centerIcon = L.divIcon({
+  className: "",
+  html: '<div class="center-pin"></div>',
+  iconSize: [22, 22], iconAnchor: [11, 11]
+});
+const schoolIcon = L.divIcon({
+  className: "",
+  html: '<div class="school-pin"></div>',
+  iconSize: [16, 16], iconAnchor: [8, 8]
+});
+
+L.marker([CENTER_LAT, CENTER_LNG], { icon: centerIcon }).addTo(map);
+
+/* ═══════════════════════════════════════════════
+   STATE
+═══════════════════════════════════════════════ */
+let routeControl = null;
+const state = { allSchools: [], markers: [], selected: null };
+
+/* ═══════════════════════════════════════════════
+   DOM
+═══════════════════════════════════════════════ */
+const g = id => document.getElementById(id);
+const dom = {
+  // Mobile counts
+  totalSchools:   g("totalSchools"),
+  visibleSchools: g("visibleSchools"),
+  // Desktop counts
+  totalSchoolsD:   g("totalSchoolsD"),
+  visibleSchoolsD: g("visibleSchoolsD"),
+  // Mobile filter inputs
+  engineerFilter: g("engineerFilter"),
+  searchInput:    g("searchInput"),
+  // Desktop filter inputs
+  engineerFilterD: g("engineerFilterD"),
+  searchInputD:    g("searchInputD"),
+  // Lists
+  schoolList:  g("schoolList"),   // mobile drawer
+  schoolListD: g("schoolListD"),  // desktop sidebar
+  selectionHint: g("selectionHint"),
+  // Info panel
+  infoPanel:         g("schoolInfoPanel"),
+  infoSchoolName:    g("schoolInfoPanel").querySelector(".info-school-name"),
+  distanceValue:     g("distanceValue"),
+  timeValue:         g("timeValue"),
+  engineerNameValue: g("engineerNameValue"),
+  engineerEmailValue:g("engineerEmailValue"),
+  engineerPhoneValue:g("engineerPhoneValue"),
+  googleMapsBtn:     g("googleMapsBtn"),
+  closeInfo:         g("closeInfo"),
+  // FABs
+  fabFilter:      g("fabFilter"),
+  fabList:        g("fabList"),
+  fabFilterLabel: g("fabFilterLabel"),
+  fabListLabel:   g("fabListLabel"),
+  // Drawers
+  filterDrawer: g("filterDrawer"),
+  listDrawer:   g("listDrawer"),
+  backdrop:     g("drawerBackdrop"),
+  closeFilter:  g("closeFilter"),
+  closeList:    g("closeList"),
+  // Lang
+  langToggleD:   g("langToggleD"),
+  langToggleMap: g("langToggleMap"),
+};
+
+/* ═══════════════════════════════════════════════
+   HELPERS
+═══════════════════════════════════════════════ */
+function toNumber(v) { const n = Number(v); return isFinite(n) ? n : null; }
+function isEmail(v)  { return String(v || "").includes("@"); }
+
+function engineerName(s) {
+  const arr = currentLang === "en"
+    ? [s.engineer_name_en, s.engineer_name_ar]
+    : [s.engineer_name_ar, s.engineer_name_en];
+  return arr.find(v => v && !isEmail(v)) || "";
+}
+function engineerEmail(s) {
+  return s.engineer_email || s["Field Engineer Email"] || s["FE Email"] || s.engineerEmail || "";
+}
+function engineerPhone(s) {
+  return s.engineer_phone || s["Field Engineer  Contact"] || s["FE phone"] || s.engineerPhone || "";
+}
+function schoolName(s) {
+  const arr = currentLang === "en"
+    ? [s.school_name_en, s.school_name_ar, s.name_en, s.name_ar, s["School Name"]]
+    : [s.school_name_ar, s.school_name_en, s.name_ar, s.name_en, s["School Name"]];
+  return arr.find(Boolean) || "";
+}
+function fmtKm(km)  { return `${km.toFixed(2)} كم`; }
+function fmtMin(sec) {
+  const m = Math.round(sec / 60), h = Math.floor(m / 60), r = m % 60;
+  if (h && r) return `${h} ساعة ${r} دقيقة`;
+  if (h)      return `${h} ساعة`;
+  return `${m} دقيقة`;
+}
+
+/* ═══════════════════════════════════════════════
+   DRAWER SYSTEM
+═══════════════════════════════════════════════ */
+let activeDrawer = null;
+
+function openDrawer(drawer) {
+  if (activeDrawer) _closeDrawer(activeDrawer, false);
+  activeDrawer = drawer;
+  dom.backdrop.style.display = "block";
+  requestAnimationFrame(() => {
+    dom.backdrop.classList.add("active");
+    drawer.classList.add("open");
+  });
+  document.body.style.overflow = "hidden";
+}
+
+function _closeDrawer(drawer, withFade = true) {
+  drawer.classList.remove("open");
+  dom.backdrop.classList.remove("active");
+  if (withFade) {
+    setTimeout(() => { if (!activeDrawer) dom.backdrop.style.display = "none"; }, 300);
+  } else {
+    dom.backdrop.style.display = "none";
+  }
+  document.body.style.overflow = "";
+  activeDrawer = null;
+}
+
+function closeActiveDrawer() {
+  if (activeDrawer) _closeDrawer(activeDrawer);
+}
+
+dom.fabFilter.addEventListener("click",   () => openDrawer(dom.filterDrawer));
+dom.fabList.addEventListener("click",     () => openDrawer(dom.listDrawer));
+dom.closeFilter.addEventListener("click", closeActiveDrawer);
+dom.closeList.addEventListener("click",   closeActiveDrawer);
+dom.backdrop.addEventListener("click",    closeActiveDrawer);
+
+/* ═══════════════════════════════════════════════
+   INFO PANEL
+═══════════════════════════════════════════════ */
+function showInfo()  {
+  dom.infoPanel.style.display = "block";
+  document.body.classList.add("info-open");
+}
+function hideInfo()  {
+  dom.infoPanel.style.display = "none";
+  document.body.classList.remove("info-open");
+}
+dom.closeInfo.addEventListener("click", hideInfo);
+
+function resetInfo() {
+  hideInfo();
+  dom.distanceValue.textContent     = "—";
+  dom.timeValue.textContent         = "—";
+  dom.engineerNameValue.textContent  = T().noData;
+  dom.engineerEmailValue.textContent = T().notAvail;
+  dom.engineerPhoneValue.textContent = T().notAvail;
+  dom.googleMapsBtn.href = "#";
+  dom.googleMapsBtn.classList.add("disabled");
+}
+
+function fillInfo(school, route = null) {
+  const name = schoolName(school) || T().unnamed;
+  dom.infoSchoolName.textContent = name;
+  if (dom.selectionHint) dom.selectionHint.textContent = name;
+
+  dom.engineerNameValue.textContent  = engineerName(school)  || T().noData;
+  dom.engineerEmailValue.textContent = engineerEmail(school) || T().notAvail;
+  dom.engineerPhoneValue.textContent = engineerPhone(school) || T().notAvail;
+
+  const lat = school.Latitude, lng = school.Longitude;
+  dom.googleMapsBtn.href = `https://www.google.com/maps?q=${lat},${lng}`;
+  dom.googleMapsBtn.classList.remove("disabled");
+
+  dom.distanceValue.textContent = route ? fmtKm(route.totalDistance / 1000)  : T().calculating;
+  dom.timeValue.textContent     = route ? fmtMin(route.totalTime)             : T().calculating;
+
+  showInfo();
+}
+
+/* ═══════════════════════════════════════════════
+   FILTER / RENDER
+═══════════════════════════════════════════════ */
+function syncSelect(src, targets) { targets.forEach(t => { if (t !== src) t.value = src.value; }); }
+function syncText(src, targets)   { targets.forEach(t => { if (t !== src) t.value = src.value; }); }
+
+function populateEngineers() {
+  const names = [...new Set(state.allSchools.map(engineerName).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, "ar"));
+  const opts = `<option value="all">${T().all}</option>` +
+    names.map(n => `<option value="${n}">${n}</option>`).join("");
+  [dom.engineerFilter, dom.engineerFilterD].forEach(el => {
+    const prev = el.value;
+    el.innerHTML = opts;
+    if (names.includes(prev)) el.value = prev;
+  });
+}
+
+function renderList() {
+  const engVal = dom.engineerFilterD.value || dom.engineerFilter.value || "all";
+  const kw     = (dom.searchInputD.value || dom.searchInput.value).trim().toLowerCase();
+  let visible  = 0;
+
+  state.markers.forEach(e => {
+    const nm  = (schoolName(e.school) || "").toLowerCase();
+    const eng = (engineerName(e.school) || "").toLowerCase();
+    const ok  = (engVal === "all" || engineerName(e.school) === engVal) &&
+                (!kw || nm.includes(kw) || eng.includes(kw));
+
+    e.itemM.style.display = ok ? "" : "none";
+    e.itemD.style.display = ok ? "" : "none";
+
+    if (ok) {
+      if (!map.hasLayer(e.marker)) e.marker.addTo(map);
+      visible++;
+    } else {
+      if (map.hasLayer(e.marker)) map.removeLayer(e.marker);
+      e.itemM.classList.remove("active");
+      e.itemD.classList.remove("active");
+    }
+  });
+
+  dom.visibleSchools.textContent  = visible;
+  dom.visibleSchoolsD.textContent = visible;
+
+  const bounds = state.markers
+    .filter(e => map.hasLayer(e.marker))
+    .map(e => [e.school.Latitude, e.school.Longitude]);
+  if (bounds.length) map.fitBounds(bounds, { padding: [50, 50] });
+}
+
+/* ═══════════════════════════════════════════════
+   ROUTING
+═══════════════════════════════════════════════ */
+function drawRoute(school) {
+  if (routeControl) map.removeControl(routeControl);
+  routeControl = L.Routing.control({
+    router: L.Routing.osrmv1({
+      serviceUrl: "https://router.project-osrm.org/route/v1"
+    }),
+    waypoints: [
+      L.latLng(CENTER_LAT, CENTER_LNG),
+      L.latLng(school.Latitude, school.Longitude)
+    ],
+    routeWhileDragging: false, addWaypoints: false,
+    draggableWaypoints: false, fitSelectedRoutes: true,
+    show: false, createMarker: () => null,
+    lineOptions: {
+      styles: [
+        { color: "#5de0ff", opacity: 0.12, weight: 16 },
+        { color: "#7c5cff", opacity: 0.90, weight: 6  },
+        { color: "#ffffff", opacity: 0.60, weight: 2  }
+      ]
+    }
+  }).addTo(map);
+
+  routeControl.on("routesfound", ev => {
+    const r = ev.routes?.[0];
+    if (r) fillInfo(school, r.summary);
+  });
+}
+
+/* ═══════════════════════════════════════════════
+   SELECTION
+═══════════════════════════════════════════════ */
+function clearActive() {
+  state.markers.forEach(e => {
+    e.itemM.classList.remove("active");
+    e.itemD.classList.remove("active");
+  });
+}
+
+function selectSchool(entry) {
+  state.selected = entry.school;
+  clearActive();
+  entry.itemM.classList.add("active");
+  entry.itemD.classList.add("active");
+  fillInfo(entry.school);
+  drawRoute(entry.school);
+  map.flyTo([entry.school.Latitude, entry.school.Longitude], 10, { animate: true, duration: 1.1 });
+  // Close list drawer on mobile
+  if (activeDrawer === dom.listDrawer) closeActiveDrawer();
+}
+
+function makeItem(school) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "school-item";
+  btn.innerHTML = `<div class="school-title">${schoolName(school) || T().unnamed}</div>`;
+  return btn;
+}
+
+/* ═══════════════════════════════════════════════
+   INIT
+═══════════════════════════════════════════════ */
+function normalise(raw) {
+  const lat = toNumber(raw.latitude ?? raw.Latitude);
+  const lng = toNumber(raw.longitude ?? raw.Longitude);
+  if (lat === null || lng === null) return null;
+  return { ...raw, Latitude: lat, Longitude: lng };
+}
+
+async function init() {
+  resetInfo();
+  try {
+    const data    = await (await fetch("schools.json")).json();
+    const schools = data.map(normalise).filter(Boolean);
+
+    // Repair engineer names stored as emails
+    const byEmail = new Map();
+    schools.forEach(s => {
+      const n = s.engineer_name_ar || s.engineer_name_en;
+      const e = (s.engineer_email || s["Field Engineer Email"] || "").toLowerCase();
+      if (n && e && !isEmail(n)) byEmail.set(e, n);
+    });
+    schools.forEach(s => {
+      const e = (s.engineer_email || s["Field Engineer Email"] || "").toLowerCase();
+      const n = s.engineer_name_ar || s.engineer_name_en;
+      if ((!n || isEmail(n)) && byEmail.has(e)) {
+        s.engineer_name_ar = s.engineer_name_en = byEmail.get(e);
+      }
+    });
+
+    state.allSchools = schools;
+    const count = schools.length;
+    [dom.totalSchools, dom.totalSchoolsD].forEach(el => el.textContent = count);
+    [dom.visibleSchools, dom.visibleSchoolsD].forEach(el => el.textContent = count);
+
+    populateEngineers();
+
+    schools.forEach(school => {
+      const marker = L.marker([school.Latitude, school.Longitude], { icon: schoolIcon }).addTo(map);
+      const itemM  = makeItem(school);   // mobile list
+      const itemD  = makeItem(school);   // desktop list
+      const entry  = { school, marker, itemM, itemD };
+
+      itemM.addEventListener("click",  () => selectSchool(entry));
+      itemD.addEventListener("click",  () => selectSchool(entry));
+      marker.on("click",               () => selectSchool(entry));
+
+      dom.schoolList.appendChild(itemM);
+      dom.schoolListD.appendChild(itemD);
+      state.markers.push(entry);
+    });
+
+    const bounds = schools.map(s => [s.Latitude, s.Longitude]);
+    if (bounds.length) map.fitBounds(bounds, { padding: [50, 50] });
+
+    // Wire filter events — mobile
+    dom.engineerFilter.addEventListener("change", e => {
+      syncSelect(e.target, [dom.engineerFilterD]);
+      renderList();
+    });
+    dom.searchInput.addEventListener("input", e => {
+      syncText(e.target, [dom.searchInputD]);
+      renderList();
+    });
+    // Wire filter events — desktop
+    dom.engineerFilterD.addEventListener("change", e => {
+      syncSelect(e.target, [dom.engineerFilter]);
+      renderList();
+    });
+    dom.searchInputD.addEventListener("input", e => {
+      syncText(e.target, [dom.searchInput]);
+      renderList();
+    });
+
+  } catch (err) {
+    console.error(err);
+    dom.engineerNameValue.textContent  = "تأكد من schools.json";
+    dom.engineerEmailValue.textContent = "وشغّل الصفحة عبر Live Server";
+    dom.engineerPhoneValue.textContent = "ثم أعد التحميل";
+    showInfo();
+  }
+}
+
+/* ═══════════════════════════════════════════════
+   LANGUAGE
+═══════════════════════════════════════════════ */
+function applyLang() {
+  const t = T();
+  document.documentElement.lang = currentLang;
+  document.documentElement.dir  = currentLang === "ar" ? "rtl" : "ltr";
+
+  document.querySelectorAll("[data-i18n]").forEach(el => {
+    if (t[el.dataset.i18n] !== undefined) el.textContent = t[el.dataset.i18n];
+  });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach(el => {
+    const k = el.dataset.i18nPlaceholder;
+    if (t[k]) el.placeholder = t[k];
+  });
+
+  const label = currentLang === "ar" ? "English" : "العربية";
+  [dom.langToggleD, dom.langToggleMap].forEach(el => { if (el) el.textContent = label; });
+  dom.fabFilterLabel.textContent = t.filtersBtn;
+  dom.fabListLabel.textContent   = t.schoolsBtn;
+
+  populateEngineers();
+
+  state.markers.forEach(e => {
+    const name = schoolName(e.school) || t.unnamed;
+    e.itemM.querySelector(".school-title").textContent = name;
+    e.itemD.querySelector(".school-title").textContent = name;
+  });
+
+  if (state.selected) fillInfo(state.selected);
+  renderList();
+}
+
+[dom.langToggleD, dom.langToggleMap].forEach(btn => {
+  if (btn) btn.addEventListener("click", () => {
+    currentLang = currentLang === "ar" ? "en" : "ar";
+    applyLang();
+  });
+});
+
+/* ── START ── */
+init();
