@@ -65,7 +65,6 @@ L.marker([CENTER_LAT, CENTER_LNG], { icon: centerIcon }).addTo(map);
 /* ═══════════════════════════════════════════════
    STATE
 ═══════════════════════════════════════════════ */
-let routeControl = null;
 const state = { allSchools: [], markers: [], selected: null };
 
 /* ═══════════════════════════════════════════════
@@ -219,7 +218,7 @@ function fillInfo(school, route = null) {
   dom.engineerPhoneValue.textContent = engineerPhone(school) || T().notAvail;
 
   const lat = school.Latitude, lng = school.Longitude;
-  dom.googleMapsBtn.href = `https://www.google.com/maps?q=${lat},${lng}`;
+  dom.googleMapsBtn.href = `https://www.google.com/maps/dir/${CENTER_LAT},${CENTER_LNG}/${lat},${lng}`;
   dom.googleMapsBtn.classList.remove("disabled");
 
   dom.distanceValue.textContent = route ? fmtKm(route.totalDistance / 1000)  : T().calculating;
@@ -280,34 +279,126 @@ function renderList() {
 }
 
 /* ═══════════════════════════════════════════════
-   ROUTING
+   ROUTING — Google Routes API (computeRoutes) + OSRM fallback
 ═══════════════════════════════════════════════ */
-function drawRoute(school) {
-  if (routeControl) map.removeControl(routeControl);
-  routeControl = L.Routing.control({
-    router: L.Routing.osrmv1({
-      serviceUrl: "https://router.project-osrm.org/route/v1"
-    }),
-    waypoints: [
-      L.latLng(CENTER_LAT, CENTER_LNG),
-      L.latLng(school.Latitude, school.Longitude)
-    ],
-    routeWhileDragging: false, addWaypoints: false,
-    draggableWaypoints: false, fitSelectedRoutes: true,
-    show: false, createMarker: () => null,
-    lineOptions: {
-      styles: [
-        { color: "#5de0ff", opacity: 0.12, weight: 16 },
-        { color: "#7c5cff", opacity: 0.90, weight: 6  },
-        { color: "#ffffff", opacity: 0.60, weight: 2  }
-      ]
-    }
-  }).addTo(map);
 
-  routeControl.on("routesfound", ev => {
-    const r = ev.routes?.[0];
-    if (r) fillInfo(school, r.summary);
+// ← ضع مفتاحك هنا (يجب تفعيل Routes API في Google Cloud Console)
+const GOOGLE_API_KEY = "AIzaSyC_3RU1DpqNImb0FviUQpiclZxliyF3AT0";
+
+// Polylines drawn on the Leaflet map
+let routePolylines = [];
+
+function clearRoutePolylines() {
+  routePolylines.forEach(p => map.removeLayer(p));
+  routePolylines = [];
+}
+
+// Decode Google's encoded polyline (Polyline Encoding Algorithm)
+function decodePolyline(encoded) {
+  const points = [];
+  let index = 0, lat = 0, lng = 0;
+  while (index < encoded.length) {
+    let b, shift = 0, result = 0;
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+    lat += (result & 1) ? ~(result >> 1) : (result >> 1);
+    shift = 0; result = 0;
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+    lng += (result & 1) ? ~(result >> 1) : (result >> 1);
+    points.push([lat / 1e5, lng / 1e5]);
+  }
+  return points;
+}
+
+function drawPolylineOnMap(latlngs) {
+  routePolylines.push(L.polyline(latlngs, { color: "#5de0ff", opacity: 0.12, weight: 16 }).addTo(map));
+  routePolylines.push(L.polyline(latlngs, { color: "#7c5cff", opacity: 0.90, weight: 6  }).addTo(map));
+  routePolylines.push(L.polyline(latlngs, { color: "#ffffff", opacity: 0.60, weight: 2  }).addTo(map));
+  map.fitBounds(L.polyline(latlngs).getBounds(), { padding: [50, 50] });
+}
+
+// ── Google Routes API (computeRoutes) ──────────────────────────────────────
+async function routeViaGoogle(school) {
+  const body = {
+    origin:      { location: { latLng: { latitude: CENTER_LAT, longitude: CENTER_LNG } } },
+    destination: { location: { latLng: { latitude: school.Latitude, longitude: school.Longitude } } },
+    travelMode:  "DRIVE",
+    routingPreference: "TRAFFIC_AWARE",
+    computeAlternativeRoutes: false,
+    routeModifiers: { avoidTolls: false, avoidHighways: false },
+    languageCode: "ar-AE",
+    units: "METRIC"
+  };
+
+  const res = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": GOOGLE_API_KEY,
+      // Request only the fields we need (required by Routes API)
+      "X-Goog-FieldMask": "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline"
+    },
+    body: JSON.stringify(body)
   });
+
+  if (!res.ok) throw new Error(`Google Routes API error: ${res.status}`);
+  const data = await res.json();
+  if (!data.routes || data.routes.length === 0) throw new Error("No routes returned");
+
+  const route       = data.routes[0];
+  const distanceM   = route.distanceMeters;
+  const durationSec = parseInt(route.duration, 10);   // "NNNs" → number
+  const latlngs     = decodePolyline(route.polyline.encodedPolyline);
+
+  drawPolylineOnMap(latlngs);
+  fillInfo(school, { totalDistance: distanceM, totalTime: durationSec });
+}
+
+// ── OSRM fallback (free, no key needed) ───────────────────────────────────
+async function routeViaOSRM(school) {
+  const url = `https://router.project-osrm.org/route/v1/driving/` +
+    `${CENTER_LNG},${CENTER_LAT};${school.Longitude},${school.Latitude}` +
+    `?overview=full&geometries=polyline`;
+
+  const res  = await fetch(url);
+  if (!res.ok) throw new Error(`OSRM error: ${res.status}`);
+  const data = await res.json();
+  if (!data.routes || data.routes.length === 0) throw new Error("No OSRM routes");
+
+  const route       = data.routes[0];
+  const distanceM   = route.distance;
+  const durationSec = route.duration;
+  const latlngs     = decodePolyline(route.geometry);
+
+  drawPolylineOnMap(latlngs);
+  fillInfo(school, { totalDistance: distanceM, totalTime: durationSec });
+}
+
+// ── Main entry: try Google first, fall back to OSRM ───────────────────────
+async function drawRoute(school) {
+  clearRoutePolylines();
+  fillInfo(school);   // show panel immediately with "جارٍ الحساب..."
+
+  // Update Google Maps open-link to show driving directions
+  dom.googleMapsBtn.href =
+    `https://www.google.com/maps/dir/${CENTER_LAT},${CENTER_LNG}/${school.Latitude},${school.Longitude}`;
+
+  const useGoogle = GOOGLE_API_KEY && GOOGLE_API_KEY !== "YOUR_GOOGLE_API_KEY_HERE";
+
+  try {
+    if (useGoogle) {
+      await routeViaGoogle(school);
+    } else {
+      await routeViaOSRM(school);
+    }
+  } catch (err) {
+    console.warn("Primary routing failed, trying fallback:", err.message);
+    try {
+      await routeViaOSRM(school);
+    } catch (err2) {
+      console.error("Fallback also failed:", err2.message);
+      fillInfo(school);   // show panel without distance/time
+    }
+  }
 }
 
 /* ═══════════════════════════════════════════════
