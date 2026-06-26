@@ -10,7 +10,7 @@ const UI = {
     searchLabel:"بحث عن مدرسة", search:"اكتب اسم المدرسة...",
     totalSchools:"إجمالي المدارس", results:"النتائج",
     schoolList:"قائمة المدارس", selectSchool:"اختر مدرسة",
-    ready:"جاهز", schoolDetails:"تفاصيل المدرسة",
+    schoolDetails:"تفاصيل المدرسة",
     distance:"المسافة", time:"الوقت", engineer:"المهندس",
     email:"البريد", phone:"الهاتف",
     openMaps:"فتح في Google Maps", headquarters:"المركز الرئيسي",
@@ -24,7 +24,7 @@ const UI = {
     searchLabel:"Search for a School", search:"Type school or engineer name...",
     totalSchools:"Total Schools", results:"Results",
     schoolList:"School List", selectSchool:"Select a school",
-    ready:"Ready", schoolDetails:"School Details",
+    schoolDetails:"School Details",
     distance:"Distance", time:"Travel Time", engineer:"Engineer",
     email:"Email", phone:"Phone",
     openMaps:"Open in Google Maps", headquarters:"Main Headquarters",
@@ -211,6 +211,8 @@ function resetInfo() {
 function fillInfo(school, route = null) {
   const name = schoolName(school) || T().unnamed;
   dom.infoSchoolName.textContent = name;
+  const idEl = document.getElementById("schoolIdValue");
+  if (idEl) idEl.textContent = school.school_id || "";
   if (dom.selectionHint) dom.selectionHint.textContent = name;
 
   dom.engineerNameValue.textContent  = engineerName(school)  || T().noData;
@@ -427,7 +429,10 @@ function makeItem(school) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "school-item";
-  btn.innerHTML = `<div class="school-title">${schoolName(school) || T().unnamed}</div>`;
+  const sid = school.school_id
+    ? `<span class="school-id-tag">${school.school_id}</span>`
+    : "";
+  btn.innerHTML = `<div class="school-title">${schoolName(school) || T().unnamed}</div>${sid}`;
   return btn;
 }
 
